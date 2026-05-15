@@ -65,6 +65,8 @@ insert into translations(lang, key, value) values
 ('en','enroll.waiting_complete','Enough stages captured. Keep following sensor prompts until fprintd confirms completion.'),
 ('en','enroll.retry','Scan did not match. Lift your finger and try again.'),
 ('en','enroll.retry_hint','Lift your finger fully before the next scan.'),
+('en','enroll.duplicate_title','duplicate fingerprint'),
+('en','enroll.duplicate','This fingerprint is already enrolled. If your current user has no enrolled fingers, the duplicate is stored for another local user or in stale device storage. Use Wipe, then restart fprintd and try again.'),
 ('en','enroll.cancel_hint','[esc]/[q] cancel enrollment'),
 ('en','enroll.success','Fingerprint enrolled successfully!'),
 ('en','enroll.finger_added','%s is ready to use.'),

@@ -14,6 +14,7 @@ const version = "0.1.0"
 
 func main() {
 	lang := flag.String("lang", "", "interface language for debugging: en, ru, or zh")
+	logLevel := flag.String("log", "off", "logging level: off, error, info, or debug")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.BoolFunc("v", "print version and exit", func(string) error {
 		*showVersion = true
@@ -25,6 +26,10 @@ func main() {
 	if *showVersion {
 		fmt.Printf("fprint-menu %s\n", version)
 		return
+	}
+	if err := app.ConfigureLogging(*logLevel); err != nil {
+		fmt.Fprintf(os.Stderr, "fprint-menu: %v\n", err)
+		os.Exit(2)
 	}
 
 	program := tea.NewProgram(app.New(version, *lang), tea.WithAltScreen(), tea.WithMouseCellMotion())

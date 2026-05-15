@@ -1,7 +1,9 @@
 package fprint
 
 import (
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -67,6 +69,38 @@ func MissingCommands() []string {
 func Enrolled(user string) ([]string, error) {
 	out, err := CommandOutput("fprintd-list", user)
 	return ParseEnrolled(out), err
+}
+
+func LocalFingerprintUsers(current string) []string {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return []string{current}
+	}
+	seen := map[string]bool{}
+	users := make([]string, 0)
+	add := func(user string) {
+		if user == "" || seen[user] {
+			return
+		}
+		seen[user] = true
+		users = append(users, user)
+	}
+	add(current)
+	add("root")
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		if uid >= 1000 && uid < 60000 {
+			add(fields[0])
+		}
+	}
+	return users
 }
 
 func ParseEnrolled(output string) []string {

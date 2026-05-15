@@ -76,6 +76,10 @@ type authStartedMsg struct {
 
 type authSuccessMsg struct{}
 
+type enrollRetryBlinkMsg struct {
+	seq int
+}
+
 type Model struct {
 	version string
 	t       *i18n.Catalog
@@ -95,24 +99,30 @@ type Model struct {
 	confirmMode confirmKind
 	finger      string
 
-	authSession  *sudo.Session
-	authCancel   context.CancelFunc
-	authStatus   string
-	authWaitPass bool
-	authPassword string
-	authFailed   bool
-	authSavedPwd string
+	authSession      *sudo.Session
+	authCancel       context.CancelFunc
+	authStatus       string
+	authWaitPass     bool
+	authPassword     string
+	authFailed       bool
+	authSavedPwd     string
+	authPasswordOnly bool
 
-	spinner       spinner.Model
-	running       string
-	enrollCurrent int
-	enrollTotal   int
-	enrollStatus  string
-	enrollWaiting bool
-	enrollCh      chan enrollProgressMsg
-	enrollCancel  context.CancelFunc
-	result        commandDoneMsg
-	message       string
+	spinner        spinner.Model
+	running        string
+	enrollCurrent  int
+	enrollTotal    int
+	enrollStatus   string
+	enrollWaiting  bool
+	enrollCh       chan enrollProgressMsg
+	enrollCancel   context.CancelFunc
+	enrollCanceled bool
+	enrollRetry    bool
+	enrollRetries  int
+	enrollBlink    bool
+	enrollBlinkSeq int
+	result         commandDoneMsg
+	message        string
 
 	pm          fprint.PackageManager
 	pmFound     bool

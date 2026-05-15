@@ -11,8 +11,14 @@ Usage:
   fprint-menu
   fprint-menu --lang ru
   fprint-menu --lang zh
+  fprint-menu --log debug
   fprint-menu --help
   fprint-menu --version
+
+Options:
+  --lang en|ru|zh       override interface language
+  --log off|error|info|debug
+                        enable logging; debug writes /tmp/fprint-menu.log
 
 Keys:
   [j]/[down]  move down

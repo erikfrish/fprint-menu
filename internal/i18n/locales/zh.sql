@@ -65,6 +65,8 @@ insert into translations(lang, key, value) values
 ('zh','enroll.waiting_complete','已采集足够阶段。请继续按照传感器提示操作，直到 fprintd 确认完成。'),
 ('zh','enroll.retry','本次扫描未匹配。请抬起手指后再试一次。'),
 ('zh','enroll.retry_hint','下一次扫描前请完全抬起手指。'),
+('zh','enroll.duplicate_title','指纹已存在'),
+('zh','enroll.duplicate','此指纹已经录入。如果当前用户没有已录入的手指，重复项可能属于其他本地用户或残留在设备存储中。请先清除，重启 fprintd 后再试。'),
 ('zh','enroll.cancel_hint','[esc]/[q] 取消录入'),
 ('zh','enroll.success','指纹录入成功！'),
 ('zh','enroll.finger_added','%s 已可使用。'),

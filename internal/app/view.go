@@ -381,6 +381,10 @@ func (m Model) viewEnrolling() string {
 	if status == "" {
 		status = m.t.T("enroll.touch")
 	}
+	statusStyle := warnStyle
+	if m.enrollRetry && !m.enrollBlink {
+		statusStyle = errorStyle
+	}
 
 	return fmt.Sprintf(
 		"%s %s\n\n%s\n%s\n\n%s\n\n%s",
@@ -388,7 +392,7 @@ func (m Model) viewEnrolling() string {
 		titleStyle.Render(m.running),
 		fp,
 		progress,
-		warnStyle.Render(status),
+		statusStyle.Render(status),
 		subtleStyle.Render(m.t.T("enroll.cancel_hint")),
 	)
 }

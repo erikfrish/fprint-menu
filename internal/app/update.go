@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -17,15 +15,6 @@ import (
 	"github.com/erikfrish/fprint-menu/internal/fprint"
 	"github.com/erikfrish/fprint-menu/internal/sudo"
 )
-
-var debugLog *log.Logger
-
-func init() {
-	file, err := os.OpenFile("/tmp/fprint-menu.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err == nil {
-		debugLog = log.New(file, "", log.LstdFlags|log.Lmicroseconds)
-	}
-}
 
 const sudoPreserveEnv = sudo.PreserveDesktopEnv
 
@@ -60,6 +49,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if debugLog != nil {
 			debugLog.Printf("command done title=%q err=%v output=%q", msg.title, msg.err, truncate(msg.output, 200))
 		}
+		if msg.err != nil && m.shouldRetryWithPassword(msg.output) {
+			return m.startPasswordFallback()
+		}
 		m.screen = screenOutput
 		m.result = msg
 		m.message = ""
@@ -71,6 +63,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, refreshEnrolledCmd(m.user)
 	case enrollProgressMsg:
+		if m.enrollCanceled {
+			return m, nil
+		}
 		if msg.current > 0 {
 			m.enrollCurrent = msg.current
 			m.enrollTotal = msg.total
@@ -79,16 +74,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.retry {
+			m.enrollRetry = true
+			m.enrollRetries++
 			m.enrollStatus = m.t.T("enroll.retry")
+			if m.enrollRetries >= 2 {
+				m.enrollBlink = true
+				m.enrollBlinkSeq++
+				return m, tea.Batch(m.readNextEnrollMsg(), enrollRetryBlinkCmd(m.enrollBlinkSeq))
+			}
 			return m, m.readNextEnrollMsg()
 		}
 		if msg.line != "" && strings.Contains(msg.line, "enroll-completed") {
 			m.enrollCh = nil
 			m.enrollWaiting = false
+			m.enrollRetry = false
+			m.enrollRetries = 0
+			m.enrollBlink = false
 			m.enrollStatus = m.t.T("enroll.completed")
 			m.screen = screenEnrollSuccess
 			return m, refreshEnrolledCmd(m.user)
 		}
+		m.enrollRetry = false
+		m.enrollRetries = 0
+		m.enrollBlink = false
 		if m.enrollCurrent == 0 {
 			m.enrollStatus = m.t.T("enroll.touch")
 		} else {
@@ -98,8 +106,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.enrollCh = nil
 			m.enrollCancel = nil
 			if msg.err != nil {
+				output := msg.err.Error()
+				if m.shouldRetryWithPassword(output) {
+					return m.startPasswordFallback()
+				}
+				err := fmt.Errorf("enroll failed")
+				if isEnrollDuplicateError(output) {
+					err = fmt.Errorf("%s", m.t.T("enroll.duplicate_title"))
+					output = m.t.T("enroll.duplicate") + "\n\n" + output
+				}
 				m.screen = screenOutput
-				m.result = commandDoneMsg{title: m.running, output: msg.err.Error(), err: fmt.Errorf("enroll failed")}
+				m.result = commandDoneMsg{title: m.running, output: output, err: err}
 				m.pm, m.pmFound = fprint.DetectPackageManager()
 				m.missingCmds = fprint.MissingCommands()
 				m.missing = nil
@@ -114,6 +131,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, refreshEnrolledCmd(m.user)
 		}
 		return m, m.readNextEnrollMsg()
+	case enrollRetryBlinkMsg:
+		if msg.seq == m.enrollBlinkSeq {
+			m.enrollBlink = false
+		}
+		return m, nil
 	case enrolledMsg:
 		m.enrolled = msg.fingers
 		m.enrolledErr = msg.err
@@ -205,6 +227,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.enrollCancel()
 				m.enrollCancel = nil
 				m.enrollCh = nil
+				m.enrollCanceled = true
 				m.screen = screenFinger
 				return m, nil
 			}
@@ -290,9 +313,7 @@ func (m Model) selectFinger(index int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.pending == actionEnroll {
-		m = m.resetAuth()
-		m.screen = screenAuth
-		return m, m.startAuth()
+		return m.startPasswordFallback()
 	}
 	return m.runFingerAction()
 }
@@ -349,6 +370,7 @@ func (m Model) resetAuth() Model {
 	m.authPassword = ""
 	m.authFailed = false
 	m.authSavedPwd = ""
+	m.authPasswordOnly = false
 	return m
 }
 
@@ -433,6 +455,14 @@ func (m Model) handleAuthKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		return m.cancelAuth()
 	case "enter":
+		if m.authWaitPass && m.authPasswordOnly {
+			m.authSavedPwd = m.authPassword
+			m.authPassword = ""
+			m.authWaitPass = false
+			m.authPasswordOnly = false
+			m.authStatus = m.t.T("auth.sending")
+			return m, func() tea.Msg { return authSuccessMsg{} }
+		}
 		if m.authWaitPass && m.authSession != nil {
 			password := m.authPassword
 			m.authPassword = ""
@@ -468,6 +498,7 @@ func (m Model) cancelAuth() (tea.Model, tea.Cmd) {
 	m.authSession = nil
 	m.authWaitPass = false
 	m.authPassword = ""
+	m.authPasswordOnly = false
 	switch m.pending {
 	case actionEnroll:
 		m.screen = screenFinger
@@ -480,12 +511,40 @@ func (m Model) cancelAuth() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) startPasswordFallback() (tea.Model, tea.Cmd) {
+	if debugLog != nil {
+		debugLog.Printf("starting password fallback pending=%v", m.pending)
+	}
+	m = m.resetAuth()
+	m.screen = screenAuth
+	m.authWaitPass = true
+	m.authPasswordOnly = true
+	m.authStatus = m.t.T("auth.password_prompt")
+	return m, nil
+}
+
+func (m Model) shouldRetryWithPassword(output string) bool {
+	if !m.needsPrivilege() {
+		return false
+	}
+	return isSudoPasswordRequired(output)
+}
+
+func (m Model) needsPrivilege() bool {
+	switch m.pending {
+	case actionEnroll, actionDelete, actionWipe, actionInstallDeps, actionRestartService:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m Model) startPrivilegedAction() (tea.Model, tea.Cmd) {
 	switch m.pending {
 	case actionDelete:
 		return m.runSudoCached(m.t.T("menu.delete"), "fprintd-delete", m.user, "-f", m.finger)
 	case actionWipe:
-		return m.runSudoCached(m.t.T("menu.wipe"), "fprintd-delete", m.user)
+		return m.runSudoCached(m.t.T("menu.wipe"), "fprintd-delete", fprint.LocalFingerprintUsers(m.user)...)
 	case actionInstallDeps:
 		if !m.pmFound {
 			m.result = commandDoneMsg{title: m.t.T("menu.install"), output: m.t.T("result.no_pkg_manager")}
@@ -528,9 +587,23 @@ func (m Model) run(title string, name string, args ...string) (tea.Model, tea.Cm
 }
 
 func (m Model) runSudoCached(title string, name string, args ...string) (tea.Model, tea.Cmd) {
-	sudoArgs := append([]string{"-S", "-p", "", sudoPreserveEnv, name}, args...)
+	sudoArgs := sudoArgs(m.authSavedPwd, name, args...)
 	if debugLog != nil {
-		debugLog.Printf("runSudoCached: sudo %v", sudoArgs)
+		debugLog.Printf("runSudoCached: sudo %v savedPwd=%v", sudoArgs, m.authSavedPwd != "")
+	}
+	if name == "fprintd-delete" {
+		m.screen = screenRunning
+		m.running = title
+		m.enrollCurrent = 0
+		m.enrollTotal = 0
+		m.enrollStatus = ""
+		m.enrollWaiting = false
+		m.outputBack = screenMenu
+		m.outputCursor = m.menuCursor
+		return m, tea.Batch(m.spinner.Tick, sudoDeleteCmd(title, sudoArgs, m.authSavedPwd))
+	}
+	if m.authSavedPwd == "" {
+		return m.run(title, "sudo", sudoArgs...)
 	}
 	return m.runWithStdin(title, m.authSavedPwd, "sudo", sudoArgs...)
 }
@@ -542,6 +615,10 @@ func (m Model) runWithStdin(title string, stdinData string, name string, args ..
 	m.enrollTotal = 0
 	m.enrollStatus = ""
 	m.enrollWaiting = false
+	m.enrollRetry = false
+	m.enrollRetries = 0
+	m.enrollBlink = false
+	m.enrollBlinkSeq = 0
 	m.outputBack = screenMenu
 	m.outputCursor = m.menuCursor
 	cmd := exec.Command(name, args...)
@@ -556,8 +633,13 @@ func (m Model) runSudoEnrollCached(title string, name string, args ...string) (t
 	m.enrollTotal = 6
 	m.enrollStatus = m.t.T("enroll.touch")
 	m.enrollWaiting = false
+	m.enrollRetry = false
+	m.enrollRetries = 0
+	m.enrollBlink = false
+	m.enrollBlinkSeq = 0
 	m.outputBack = screenFinger
 	m.outputCursor = m.cursor
+	m.enrollCanceled = false
 	ch := make(chan enrollProgressMsg, 32)
 	m.enrollCh = ch
 	ctx, cancel := context.WithCancel(context.Background())
@@ -565,7 +647,7 @@ func (m Model) runSudoEnrollCached(title string, name string, args ...string) (t
 	if debugLog != nil {
 		debugLog.Printf("runSudoEnrollCached: sudo %s %v", name, args)
 	}
-	go streamEnrollProgressCached(ctx, m.authSavedPwd, name, args, ch)
+	go streamEnrollProgressCached(ctx, m.authSavedPwd, name, args, ch, containsString(m.enrolled, m.finger), m.user, m.finger)
 	return m, tea.Batch(m.spinner.Tick, m.readNextEnrollMsg())
 }
 
@@ -583,20 +665,45 @@ func (m Model) readNextEnrollMsg() tea.Cmd {
 	}
 }
 
-func streamEnrollProgressCached(ctx context.Context, password string, name string, args []string, ch chan enrollProgressMsg) {
+func enrollRetryBlinkCmd(seq int) tea.Cmd {
+	return tea.Tick(220*time.Millisecond, func(time.Time) tea.Msg {
+		return enrollRetryBlinkMsg{seq: seq}
+	})
+}
+
+func streamEnrollProgressCached(ctx context.Context, password string, name string, args []string, ch chan enrollProgressMsg, replace bool, user string, finger string) {
 	defer close(ch)
 	if debugLog != nil {
 		debugLog.Printf("streamEnrollProgressCached: starting, name=%s args=%v", name, args)
 	}
 	if err := restartFprintdCached(ctx, password); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		if debugLog != nil {
 			debugLog.Printf("streamEnrollProgressCached: restartFprintd failed: %v", err)
 		}
 		ch <- enrollProgressMsg{done: true, err: err}
 		return
 	}
+	if replace {
+		if err := deleteFingerCached(ctx, password, user, finger); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			ch <- enrollProgressMsg{done: true, err: err}
+			return
+		}
+	}
+	time.Sleep(750 * time.Millisecond)
+	if ctx.Err() != nil {
+		return
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		err := streamEnrollAttemptCached(ctx, password, name, args, ch)
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil {
 			ch <- enrollProgressMsg{done: true, current: 6, total: 6}
 			return
@@ -614,12 +721,14 @@ func streamEnrollProgressCached(ctx context.Context, password string, name strin
 }
 
 func streamEnrollAttemptCached(ctx context.Context, password string, name string, args []string, ch chan enrollProgressMsg) error {
-	sudoArgs := append([]string{"-S", "-p", "", sudoPreserveEnv, name}, args...)
+	sudoArgs := sudoArgs(password, name, args...)
 	if debugLog != nil {
-		debugLog.Printf("streamEnrollAttemptCached: sudo %v", sudoArgs)
+		debugLog.Printf("streamEnrollAttemptCached: sudo %v savedPwd=%v", sudoArgs, password != "")
 	}
 	cmd := exec.CommandContext(ctx, "sudo", sudoArgs...)
-	cmd.Stdin = strings.NewReader(password + "\n")
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -631,6 +740,7 @@ func streamEnrollAttemptCached(ctx context.Context, password string, name string
 	}
 	current := 0
 	total := 6
+	started := false
 	var allOutput strings.Builder
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
@@ -638,10 +748,18 @@ func streamEnrollAttemptCached(ctx context.Context, password string, name string
 		allOutput.WriteString(line)
 		allOutput.WriteString("\n")
 		if !strings.HasPrefix(line, "Enroll result:") {
+			if strings.HasPrefix(line, "Enrolling ") {
+				ch <- enrollProgressMsg{line: line, current: 0, total: total}
+			}
 			continue
 		}
 		switch {
 		case strings.Contains(line, "enroll-stage-passed"):
+			if !started {
+				started = true
+				ch <- enrollProgressMsg{line: line, current: 0, total: total}
+				continue
+			}
 			if current < total-1 {
 				current++
 			}
@@ -656,6 +774,9 @@ func streamEnrollAttemptCached(ctx context.Context, password string, name string
 			return nil
 		case strings.Contains(line, "enroll-retry"):
 			ch <- enrollProgressMsg{line: line, current: current, total: total, retry: true}
+		case strings.Contains(line, "enroll-duplicate"):
+			_ = cmd.Wait()
+			return fmt.Errorf("%s", line)
 		case strings.Contains(line, "enroll-fail"):
 			_ = cmd.Wait()
 			return fmt.Errorf("%s", line)
@@ -681,24 +802,67 @@ func streamEnrollAttemptCached(ctx context.Context, password string, name string
 	return nil
 }
 
-func restartFprintdCached(ctx context.Context, password string) error {
+func deleteFingerCached(ctx context.Context, password string, user string, finger string) error {
 	if debugLog != nil {
-		debugLog.Printf("restartFprintdCached: starting")
+		debugLog.Printf("deleteFingerCached: user=%s finger=%s savedPwd=%v", user, finger, password != "")
 	}
-	cmd := exec.CommandContext(ctx, "sudo", "-S", "-p", "", sudoPreserveEnv, "systemctl", "restart", "fprintd")
-	stdin, pipeErr := cmd.StdinPipe()
-	if pipeErr != nil {
-		return pipeErr
+	cmd := exec.CommandContext(ctx, "sudo", sudoArgs(password, "fprintd-delete", user, "-f", finger)...)
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
 	}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	if err := cmd.Start(); err != nil {
-		return err
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s\n%s", err.Error(), strings.TrimSpace(buf.String()))
 	}
-	_, _ = stdin.Write([]byte(password + "\n"))
-	_ = stdin.Close()
-	err := cmd.Wait()
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isEnrollDuplicateError(output string) bool {
+	return strings.Contains(output, "enroll-duplicate")
+}
+
+func isSudoPasswordRequired(output string) bool {
+	for _, event := range sudo.ParseEvents(output) {
+		switch event.Kind {
+		case sudo.EventPasswordPrompt, sudo.EventPasswordFailed, sudo.EventNoPassword:
+			return true
+		}
+	}
+	text := strings.ToLower(output)
+	return strings.Contains(text, "a password is required") || strings.Contains(text, "no password was provided")
+}
+
+func sudoArgs(password string, name string, args ...string) []string {
+	prefix := []string{"-n", sudoPreserveEnv, name}
+	if password != "" {
+		prefix = []string{"-S", "-p", "", sudoPreserveEnv, name}
+	}
+	return append(prefix, args...)
+}
+
+func restartFprintdCached(ctx context.Context, password string) error {
+	if debugLog != nil {
+		debugLog.Printf("restartFprintdCached: starting savedPwd=%v", password != "")
+	}
+	cmd := exec.CommandContext(ctx, "sudo", sudoArgs(password, "systemctl", "restart", "fprintd")...)
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
 	if debugLog != nil {
 		debugLog.Printf("restartFprintdCached: err=%v output=%q", err, truncate(strings.TrimSpace(buf.String()), 200))
 	}
@@ -787,6 +951,35 @@ func commandCmd(title string, argv []string, cmd *exec.Cmd) tea.Cmd {
 		err := cmd.Run()
 		return commandDoneMsg{title: title, cmd: argv, output: buf.String(), err: err}
 	}
+}
+
+func sudoDeleteCmd(title string, sudoArgs []string, password string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := runSudoCapture(sudoArgs, password)
+		if err == nil || !isAlreadyInUseError(output) {
+			return commandDoneMsg{title: title, cmd: append([]string{"sudo"}, sudoArgs...), output: output, err: err}
+		}
+		if debugLog != nil {
+			debugLog.Printf("sudoDeleteCmd: already in use, restarting fprintd and retrying")
+		}
+		if restartErr := restartFprintdCached(context.Background(), password); restartErr != nil {
+			return commandDoneMsg{title: title, cmd: []string{"sudo", "systemctl", "restart", "fprintd"}, output: restartErr.Error(), err: restartErr}
+		}
+		output, err = runSudoCapture(sudoArgs, password)
+		return commandDoneMsg{title: title, cmd: append([]string{"sudo"}, sudoArgs...), output: output, err: err}
+	}
+}
+
+func runSudoCapture(sudoArgs []string, password string) (string, error) {
+	cmd := exec.Command("sudo", sudoArgs...)
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return buf.String(), err
 }
 
 func refreshEnrolledCmd(target string) tea.Cmd {
